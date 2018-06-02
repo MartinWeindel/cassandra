@@ -148,9 +148,27 @@ public class StreamReceiveTask extends StreamTask
             this.task = task;
         }
 
+        /*
+         * We have a special path for views and for CDC.
+         *
+         * For views, since the view requires cleaning up any pre-existing state, we must put all partitions
+         * through the same write path as normal mutations. This also ensures any 2is are also updated.
+         *
+         * For CDC-enabled tables, we want to ensure that the mutations are run through the CommitLog so they
+         * can be archived by the CDC process on discard.
+         */
+        private boolean requiresWritePath(Pair<String, String> kscf) {
+            boolean hasViews = !Iterables.isEmpty(View.findAll(kscf.left, kscf.right));
+            String description = task.session.description();
+            boolean requiresViewBuild = description.equalsIgnoreCase("Repair")
+                || description.equalsIgnoreCase("Bulk Load");
+            return hasViews && requiresViewBuild;
+        }
+
+
         public void run()
         {
-            boolean hasViews = false;
+            boolean requiresWritePath = false;
             ColumnFamilyStore cfs = null;
             try
             {
@@ -164,7 +182,8 @@ public class StreamReceiveTask extends StreamTask
                     return;
                 }
                 cfs = Keyspace.open(kscf.left).getColumnFamilyStore(kscf.right);
-                hasViews = !Iterables.isEmpty(View.findAll(kscf.left, kscf.right));
+                requiresWritePath = requiresWritePath(kscf);
+
 
                 Collection<SSTableReader> readers = task.sstables;
 
@@ -174,7 +193,7 @@ public class StreamReceiveTask extends StreamTask
                     //Since the view requires cleaning up any pre-existing state, we must put
                     //all partitions through the same write path as normal mutations.
                     //This also ensures any 2is are also updated
-                    if (hasViews)
+                    if (requiresWritePath)
                     {
                         for (SSTableReader reader : readers)
                         {
@@ -238,7 +257,7 @@ public class StreamReceiveTask extends StreamTask
             {
                 //We don't keep the streamed sstables since we've applied them manually
                 //So we abort the txn and delete the streamed sstables
-                if (hasViews)
+                if (requiresWritePath)
                 {
                     if (cfs != null)
                         cfs.forceBlockingFlush();
